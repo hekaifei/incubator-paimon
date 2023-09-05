@@ -68,6 +68,20 @@ public class FlinkConnectorOptions {
                                                             + "."))
                                     .build());
 
+    public static final ConfigOption<Integer> LOG_SYSTEM_PARTITIONS =
+            ConfigOptions.key("log.system.partitions")
+                    .intType()
+                    .defaultValue(1)
+                    .withDescription(
+                            "The number of partitions of the log system. If log system is kafka, this is kafka partitions.");
+
+    public static final ConfigOption<Integer> LOG_SYSTEM_REPLICATION =
+            ConfigOptions.key("log.system.replication")
+                    .intType()
+                    .defaultValue(1)
+                    .withDescription(
+                            "The number of replication of the log system. If log system is kafka, this is kafka replicationFactor.");
+
     public static final ConfigOption<Integer> SINK_PARALLELISM =
             ConfigOptions.key("sink.parallelism")
                     .intType()
@@ -101,9 +115,8 @@ public class FlinkConnectorOptions {
                     .booleanType()
                     .defaultValue(true)
                     .withDescription(
-                            "If it is false, parallelism of source are set by "
-                                    + SCAN_PARALLELISM.key()
-                                    + ". Otherwise, source parallelism is inferred from splits number (batch mode) or bucket number(streaming mode).");
+                            "If it is false, parallelism of source are set by global parallelism."
+                                    + " Otherwise, source parallelism is inferred from splits number (batch mode) or bucket number(streaming mode).");
 
     @Deprecated
     @ExcludeFromDocumentation("Deprecated")
@@ -190,6 +203,16 @@ public class FlinkConnectorOptions {
                             "If true, flink sink will use managed memory for merge tree; otherwise, "
                                     + "it will create an independent memory allocator.");
 
+    public static final ConfigOption<Boolean> SCAN_REMOVE_NORMALIZE =
+            key("scan.remove-normalize")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDeprecatedKeys("log.scan.remove-normalize")
+                    .withDescription(
+                            "Whether to force the removal of the normalize node when streaming read."
+                                    + " Note: This is dangerous and is likely to cause data errors if downstream"
+                                    + " is used to calculate aggregation and the input is not complete changelog.");
+
     /**
      * Weight of writer buffer in managed memory, Flink will compute the memory size for writer
      * according to the weight, the actual memory used depends on the running environment.
@@ -235,6 +258,13 @@ public class FlinkConnectorOptions {
                     .intType()
                     .defaultValue(16)
                     .withDescription("The thread number for lookup async.");
+
+    public static final ConfigOption<Boolean> SINK_AUTO_TAG_FOR_SAVEPOINT =
+            ConfigOptions.key("sink.savepoint.auto-tag")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "If true, a tag will be automatically created for the snapshot created by flink savepoint.");
 
     public static List<ConfigOption<?>> getOptions() {
         final Field[] fields = FlinkConnectorOptions.class.getFields();

@@ -46,17 +46,6 @@ CREATE TABLE t3 (
     v1 INT
 );
 
--- test tinyint(1) convert
-CREATE DATABASE paimon_sync_database_tinyint;
-USE paimon_sync_database_tinyint;
-
-CREATE TABLE t4 (
-    pk INT,
-    _datetime DATETIME,
-    _tinyint1 TINYINT(1),
-    PRIMARY KEY (pk)
-);
-
 -- to make sure we use JDBC Driver correctly
 CREATE DATABASE paimon_sync_database1;
 USE paimon_sync_database1;
@@ -322,22 +311,6 @@ CREATE TABLE a (
     PRIMARY KEY (k)
 );
 
-CREATE DATABASE paimon_sync_database_tinyint_schema;
-USE paimon_sync_database_tinyint_schema;
-
-CREATE TABLE schema_evolution_4 (
-    _id INT comment  '_id',
-    v1 VARCHAR(10) comment  'v1',
-    PRIMARY KEY (_id)
-);
-
-CREATE TABLE schema_evolution_5 (
-    _id INT comment  '_id',
-    v1 VARCHAR(10) comment  'v1',
-    v2 TINYINT(1) comment 'tinyint(1)',
-    PRIMARY KEY (_id)
-);
-
 CREATE DATABASE many_table_sync_test;
 USE many_table_sync_test;
 
@@ -432,11 +405,11 @@ CREATE TABLE t2 (
 );
 
 -- ################################################################################
---  testUnmonitorTablesWithMergingShards
+--  testMonitoredAndExcludedTablesWithMering
 -- ################################################################################
 
-CREATE DATABASE test_unmonitor_table_shard_1;
-USE test_unmonitor_table_shard_1;
+CREATE DATABASE monitored_and_excluded_shard_1;
+USE monitored_and_excluded_shard_1;
 
 CREATE TABLE t1 (
     k INT,
@@ -450,9 +423,15 @@ CREATE TABLE t2 (
     PRIMARY KEY (k)
 );
 
+CREATE TABLE t3 (
+    k INT,
+    v1 VARCHAR(10),
+    PRIMARY KEY (k)
+);
 
-CREATE DATABASE test_unmonitor_table_shard_2;
-USE test_unmonitor_table_shard_2;
+
+CREATE DATABASE monitored_and_excluded_shard_2;
+USE monitored_and_excluded_shard_2;
 
 CREATE TABLE t1 (
     k INT,
@@ -466,3 +445,7 @@ CREATE TABLE t2 (
     PRIMARY KEY (k)
 );
 
+CREATE TABLE t3 (
+    k INT,
+    v2 VARCHAR(10)
+);

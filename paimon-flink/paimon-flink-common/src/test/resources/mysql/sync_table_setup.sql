@@ -52,6 +52,9 @@ CREATE TABLE schema_evolution_multiple (
 CREATE TABLE all_types_table (
     _id INT,
     pt DECIMAL(2, 1),
+    -- BIT
+    _bit1 BIT,
+    _bit BIT(64),
     -- TINYINT
     _tinyint1 TINYINT(1),
     _boolean BOOLEAN,
@@ -104,6 +107,7 @@ CREATE TABLE all_types_table (
     _decimal DECIMAL(8),
     _decimal_unsigned DECIMAL(8) UNSIGNED,
     _decimal_unsigned_zerofill DECIMAL(8) UNSIGNED ZEROFILL,
+    _big_decimal DECIMAL(38,10),
     -- DATE
     _date DATE,
     -- DATETIME
@@ -152,6 +156,8 @@ CREATE TABLE all_types_table (
 
 INSERT INTO all_types_table VALUES (
     1, 1.1,
+    -- BIT
+    1, B'11111000111',
     -- TINYINT
     true, true, false, 1, 2, 3,
     -- SMALLINT
@@ -175,7 +181,7 @@ INSERT INTO all_types_table VALUES (
     -- FIXED
     123456789876543212345678987654321.11, 123456789876543212345678987654321.22, 123456789876543212345678987654321.33,
     -- DECIMAL
-    11111, 22222, 33333,
+    11111, 22222, 33333, 2222222222222222300000001111.1234567890,
     -- DATE
     '2023-03-23',
     -- DATETIME
@@ -207,6 +213,7 @@ INSERT INTO all_types_table VALUES (
     'a,b'
 ), (
     2, 2.2,
+    NULL, NULL,
     NULL, NULL, NULL, NULL, NULL, NULL,
     NULL, NULL, NULL,
     NULL, NULL, NULL,
@@ -218,7 +225,7 @@ INSERT INTO all_types_table VALUES (
     NULL, NULL, NULL,
     NULL, NULL, NULL,
     NULL, NULL, NULL,
-    NULL, NULL, NULL,
+    NULL, NULL, NULL, NULL,
     NULL,
     NULL, NULL, NULL,
     NULL, NULL,
@@ -274,27 +281,6 @@ CREATE TABLE test_computed_column (
     PRIMARY KEY (pk)
 );
 
-CREATE TABLE test_tinyint1_convert (
-    pk INT,
-    _datetime DATETIME,
-    _tinyint1 TINYINT(1),
-    PRIMARY KEY (pk)
-);
-
--- ################################################################################
---  testSchemaEvolutionWithTinyint1Convert
--- ################################################################################
-
-CREATE DATABASE paimon_sync_table_tinyint;
-USE paimon_sync_table_tinyint;
-
-CREATE TABLE schema_evolution_3 (
-    pt INT comment  'primary',
-    _id INT comment  '_id',
-    v1 VARCHAR(10) comment  'v1',
-    PRIMARY KEY (_id)
-);
-
 -- ################################################################################
 --  testSyncShard
 -- ################################################################################
@@ -303,6 +289,12 @@ CREATE DATABASE shard_1;
 USE shard_1;
 
 CREATE TABLE t1 (
+    pk INT,
+    _date VARCHAR(10),
+    PRIMARY KEY (pk)
+);
+
+CREATE TABLE t2 (
     pk INT,
     _date VARCHAR(10),
     PRIMARY KEY (pk)
@@ -317,26 +309,8 @@ CREATE TABLE t1 (
     PRIMARY KEY (pk)
 );
 
-
--- ################################################################################
---  testSyncMultipleTable
--- ################################################################################
-
-CREATE DATABASE paimon_multiple_table;
-USE paimon_multiple_table;
-
-CREATE TABLE t1 (
-    id INT,
-    name VARCHAR(10),
-    PRIMARY KEY (id)
-);
-
-INSERT INTO t1 VALUES (1, 'flink');
-
 CREATE TABLE t2 (
-    id INT,
-    name VARCHAR(10),
-    PRIMARY KEY (id)
+    pk INT,
+    _date VARCHAR(10),
+    PRIMARY KEY (pk)
 );
-
-INSERT INTO t2 VALUES (2, 'paimon');

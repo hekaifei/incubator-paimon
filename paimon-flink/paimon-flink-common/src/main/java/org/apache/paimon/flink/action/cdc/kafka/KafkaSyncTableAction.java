@@ -18,13 +18,18 @@
 
 package org.apache.paimon.flink.action.cdc.kafka;
 
+import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.flink.action.Action;
 import org.apache.paimon.flink.action.ActionBase;
+import org.apache.paimon.flink.action.cdc.CdcActionCommonUtils;
 import org.apache.paimon.flink.action.cdc.ComputedColumn;
-import org.apache.paimon.flink.action.cdc.kafka.canal.CanalRecordParser;
+import org.apache.paimon.flink.action.cdc.TableNameConverter;
+import org.apache.paimon.flink.action.cdc.TypeMapping;
+import org.apache.paimon.flink.action.cdc.kafka.formats.DataFormat;
+import org.apache.paimon.flink.action.cdc.kafka.formats.RecordParser;
 import org.apache.paimon.flink.sink.cdc.CdcSinkBuilder;
 import org.apache.paimon.flink.sink.cdc.EventParser;
 import org.apache.paimon.flink.sink.cdc.RichCdcMultiplexRecord;
@@ -38,7 +43,9 @@ import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.connectors.kafka.table.KafkaConnectorOptions;
 
-import java.util.Collections;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -50,7 +57,7 @@ import static org.apache.paimon.flink.action.cdc.ComputedColumnUtils.buildComput
  * <p>This topic must be from canal-json format.
  *
  * <p>You should specify Kafka source topic in {@code kafkaConfig}. See <a
- * href="https://nightlies.apache.org/flink/flink-docs-release-1.16/zh/docs/connectors/table/kafka/">document
+ * href="https://nightlies.apache.org/flink/flink-docs-stable/docs/connectors/table/kafka/">document
  * of flink-connectors</a> for detailed keys and values.
  *
  * <p>If the specified Paimon table does not exist, this action will automatically create the table.
@@ -78,61 +85,67 @@ import static org.apache.paimon.flink.action.cdc.ComputedColumnUtils.buildComput
  */
 public class KafkaSyncTableAction extends ActionBase {
 
-    private final Configuration kafkaConfig;
     private final String database;
     private final String table;
-    private final List<String> partitionKeys;
-    private final List<String> primaryKeys;
+    private final Configuration kafkaConfig;
 
-    private final List<String> computedColumnArgs;
+    private List<String> partitionKeys = new ArrayList<>();
+    private List<String> primaryKeys = new ArrayList<>();
 
-    private final Map<String, String> paimonConfig;
+    private Map<String, String> tableConfig = new HashMap<>();
+    private List<String> computedColumnArgs = new ArrayList<>();
+    private TypeMapping typeMapping = TypeMapping.defaultMapping();
 
     public KafkaSyncTableAction(
-            Map<String, String> kafkaConfig,
             String warehouse,
             String database,
             String table,
-            List<String> partitionKeys,
-            List<String> primaryKeys,
             Map<String, String> catalogConfig,
-            Map<String, String> paimonConfig) {
-        this(
-                kafkaConfig,
-                warehouse,
-                database,
-                table,
-                partitionKeys,
-                primaryKeys,
-                Collections.emptyList(),
-                catalogConfig,
-                paimonConfig);
-    }
-
-    public KafkaSyncTableAction(
-            Map<String, String> kafkaConfig,
-            String warehouse,
-            String database,
-            String table,
-            List<String> partitionKeys,
-            List<String> primaryKeys,
-            List<String> computedColumnArgs,
-            Map<String, String> catalogConfig,
-            Map<String, String> paimonConfig) {
+            Map<String, String> kafkaConfig) {
         super(warehouse, catalogConfig);
-        this.kafkaConfig = Configuration.fromMap(kafkaConfig);
         this.database = database;
         this.table = table;
-        this.partitionKeys = partitionKeys;
-        this.primaryKeys = primaryKeys;
-        this.computedColumnArgs = computedColumnArgs;
-        this.paimonConfig = paimonConfig;
+        this.kafkaConfig = Configuration.fromMap(kafkaConfig);
     }
 
+    public KafkaSyncTableAction withPartitionKeys(String... partitionKeys) {
+        return withPartitionKeys(Arrays.asList(partitionKeys));
+    }
+
+    public KafkaSyncTableAction withPartitionKeys(List<String> partitionKeys) {
+        this.partitionKeys = partitionKeys;
+        return this;
+    }
+
+    public KafkaSyncTableAction withPrimaryKeys(String... primaryKeys) {
+        return withPrimaryKeys(Arrays.asList(primaryKeys));
+    }
+
+    public KafkaSyncTableAction withPrimaryKeys(List<String> primaryKeys) {
+        this.primaryKeys = primaryKeys;
+        return this;
+    }
+
+    public KafkaSyncTableAction withTableConfig(Map<String, String> tableConfig) {
+        this.tableConfig = tableConfig;
+        return this;
+    }
+
+    public KafkaSyncTableAction withComputedColumnArgs(List<String> computedColumnArgs) {
+        this.computedColumnArgs = computedColumnArgs;
+        return this;
+    }
+
+    public KafkaSyncTableAction withTypeMapping(TypeMapping typeMapping) {
+        this.typeMapping = typeMapping;
+        return this;
+    }
+
+    @Override
     public void build(StreamExecutionEnvironment env) throws Exception {
         KafkaSource<String> source = KafkaActionUtils.buildKafkaSource(kafkaConfig);
         String topic = kafkaConfig.get(KafkaConnectorOptions.TOPIC).get(0);
-        KafkaSchema kafkaSchema = KafkaSchema.getKafkaSchema(kafkaConfig, topic);
+        KafkaSchema kafkaSchema = KafkaSchema.getKafkaSchema(kafkaConfig, topic, typeMapping);
 
         catalog.createDatabase(database, true);
         boolean caseSensitive = catalog.caseSensitive();
@@ -147,22 +160,24 @@ public class KafkaSyncTableAction extends ActionBase {
                         partitionKeys,
                         primaryKeys,
                         computedColumns,
-                        paimonConfig,
+                        tableConfig,
                         caseSensitive);
         try {
             table = (FileStoreTable) catalog.getTable(identifier);
-            KafkaActionUtils.assertSchemaCompatible(table.schema(), fromCanal);
+            CdcActionCommonUtils.assertSchemaCompatible(table.schema(), fromCanal.fields());
         } catch (Catalog.TableNotExistException e) {
             catalog.createTable(identifier, fromCanal, false);
             table = (FileStoreTable) catalog.getTable(identifier);
         }
-        String format = kafkaConfig.get(KafkaConnectorOptions.VALUE_FORMAT);
-        EventParser.Factory<RichCdcMultiplexRecord> parserFactory;
-        if ("canal-json".equals(format)) {
-            parserFactory = RichCdcMultiplexRecordEventParser::new;
-        } else {
-            throw new UnsupportedOperationException("This format: " + format + " is not support.");
-        }
+        DataFormat format = DataFormat.getDataFormat(kafkaConfig);
+        RecordParser recordParser =
+                format.createParser(
+                        caseSensitive,
+                        new TableNameConverter(caseSensitive),
+                        typeMapping,
+                        computedColumns);
+        EventParser.Factory<RichCdcMultiplexRecord> parserFactory =
+                RichCdcMultiplexRecordEventParser::new;
 
         CdcSinkBuilder<RichCdcMultiplexRecord> sinkBuilder =
                 new CdcSinkBuilder<RichCdcMultiplexRecord>()
@@ -171,18 +186,26 @@ public class KafkaSyncTableAction extends ActionBase {
                                                 source,
                                                 WatermarkStrategy.noWatermarks(),
                                                 "Kafka Source")
-                                        .flatMap(
-                                                new CanalRecordParser(
-                                                        caseSensitive, computedColumns)))
+                                        .flatMap(recordParser))
                         .withParserFactory(parserFactory)
                         .withTable(table)
                         .withIdentifier(identifier)
                         .withCatalogLoader(catalogLoader());
-        String sinkParallelism = paimonConfig.get(FlinkConnectorOptions.SINK_PARALLELISM.key());
+        String sinkParallelism = tableConfig.get(FlinkConnectorOptions.SINK_PARALLELISM.key());
         if (sinkParallelism != null) {
             sinkBuilder.withParallelism(Integer.parseInt(sinkParallelism));
         }
         sinkBuilder.build();
+    }
+
+    @VisibleForTesting
+    public Map<String, String> tableConfig() {
+        return tableConfig;
+    }
+
+    @VisibleForTesting
+    public Map<String, String> catalogConfig() {
+        return catalogConfig;
     }
 
     // ------------------------------------------------------------------------

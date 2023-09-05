@@ -24,6 +24,7 @@ import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.table.system.AllTableOptionsTable;
+import org.apache.paimon.table.system.CatalogOptionsTable;
 import org.apache.paimon.types.IntType;
 import org.apache.paimon.utils.BlockingIterator;
 
@@ -103,6 +104,12 @@ public class CatalogTableITCase extends CatalogITCaseBase {
     }
 
     @Test
+    public void testCatalogOptionsTable() {
+        List<Row> result = sql("SELECT * FROM sys.catalog_options");
+        assertThat(result).containsExactly(Row.of("warehouse", path));
+    }
+
+    @Test
     public void testDropSystemDatabase() {
         assertThatCode(() -> sql("DROP DATABASE sys"))
                 .hasRootCauseMessage("Can't do operation on system database.");
@@ -125,7 +132,9 @@ public class CatalogTableITCase extends CatalogITCaseBase {
     public void testSystemDatabase() {
         sql("USE " + Catalog.SYSTEM_DATABASE_NAME);
         assertThat(sql("SHOW TABLES"))
-                .containsExactly(Row.of(AllTableOptionsTable.ALL_TABLE_OPTIONS));
+                .containsExactly(
+                        Row.of(AllTableOptionsTable.ALL_TABLE_OPTIONS),
+                        Row.of(CatalogOptionsTable.CATALOG_OPTIONS));
     }
 
     @Test
@@ -180,10 +189,14 @@ public class CatalogTableITCase extends CatalogITCaseBase {
                                 + "  `partition_keys` VARCHAR(2147483647) NOT NULL,\n"
                                 + "  `primary_keys` VARCHAR(2147483647) NOT NULL,\n"
                                 + "  `options` VARCHAR(2147483647) NOT NULL,\n"
-                                + "  `comment` VARCHAR(2147483647)\n"
+                                + "  `comment` VARCHAR(2147483647),\n"
+                                + "  `update_time` TIMESTAMP(3) NOT NULL\n"
                                 + ") ]]");
 
-        List<Row> result = sql("SELECT * FROM T$schemas order by schema_id");
+        List<Row> result =
+                sql(
+                        "SELECT schema_id, fields, partition_keys, "
+                                + "primary_keys, options, `comment` FROM T$schemas order by schema_id");
 
         assertThat(result.toString())
                 .isEqualTo(
@@ -222,7 +235,10 @@ public class CatalogTableITCase extends CatalogITCaseBase {
     public void testCreateTableLike() throws Exception {
         sql("CREATE TABLE T (a INT)");
         sql("CREATE TABLE T1 LIKE T");
-        List<Row> result = sql("SELECT * FROM T1$schemas s");
+        List<Row> result =
+                sql(
+                        "SELECT schema_id, fields, partition_keys, "
+                                + "primary_keys, options, `comment` FROM T1$schemas s");
         assertThat(result.toString())
                 .isEqualTo("[+I[0, [{\"id\":0,\"name\":\"a\",\"type\":\"INT\"}], [], [], {}, ]]");
     }
@@ -232,7 +248,10 @@ public class CatalogTableITCase extends CatalogITCaseBase {
         sql("CREATE TABLE t (a INT)");
         sql("INSERT INTO t VALUES(1),(2)");
         sql("CREATE TABLE t1 AS SELECT * FROM t");
-        List<Row> result = sql("SELECT * FROM t1$schemas s");
+        List<Row> result =
+                sql(
+                        "SELECT schema_id, fields, partition_keys, "
+                                + "primary_keys, options, `comment` FROM t1$schemas s");
         assertThat(result.toString())
                 .isEqualTo("[+I[0, [{\"id\":0,\"name\":\"a\",\"type\":\"INT\"}], [], [], {}, ]]");
         List<Row> data = sql("SELECT * FROM t1");
@@ -249,7 +268,10 @@ public class CatalogTableITCase extends CatalogITCaseBase {
                         + ") PARTITIONED BY (dt, hh)");
         sql("INSERT INTO t_p SELECT 1,2,'a','2023-02-19','12'");
         sql("CREATE TABLE t1_p WITH ('partition' = 'dt' ) AS SELECT * FROM t_p");
-        List<Row> resultPartition = sql("SELECT * FROM t1_p$schemas s");
+        List<Row> resultPartition =
+                sql(
+                        "SELECT schema_id, fields, partition_keys, "
+                                + "primary_keys, options, `comment` FROM t1_p$schemas s");
         assertThat(resultPartition.toString())
                 .isEqualTo(
                         "[+I[0, [{\"id\":0,\"name\":\"user_id\",\"type\":\"BIGINT\"},{\"id\":1,\"name\":\"item_id\",\"type\":\"BIGINT\"},"
@@ -318,7 +340,8 @@ public class CatalogTableITCase extends CatalogITCaseBase {
                         () ->
                                 sql(
                                         "CREATE TABLE t_pk_not_exist_as WITH ('primary-key' = 'aaa') AS SELECT * FROM t_pk_not_exist"))
-                .hasRootCauseMessage("Primary key column '[aaa]' is not defined in the schema.");
+                .hasRootCauseMessage(
+                        "Table column [user_id, item_id, behavior, dt, hh] should include all primary key constraint [aaa]");
 
         // primary key in option and DDL.
         assertThatThrownBy(
@@ -349,7 +372,8 @@ public class CatalogTableITCase extends CatalogITCaseBase {
                         () ->
                                 sql(
                                         "CREATE TABLE t_partition_not_exist_as WITH ('partition' = 'aaa') AS SELECT * FROM t_partition_not_exist"))
-                .hasRootCauseMessage("Partition column '[aaa]' is not defined in the schema.");
+                .hasRootCauseMessage(
+                        "Table column [user_id, item_id, behavior, dt, hh] should include all partition fields [aaa]");
 
         // partition in option and DDL.
         assertThatThrownBy(
@@ -383,6 +407,23 @@ public class CatalogTableITCase extends CatalogITCaseBase {
                 .isInstanceOf(UnsupportedOperationException.class)
                 .hasMessage(
                         "Can not set the write-mode to append-only and changelog-producer at the same time.");
+    }
+
+    @Test
+    public void testChangelogProducerOnAppendOnlyTable() {
+        assertThatThrownBy(
+                        () -> sql("CREATE TABLE T (a INT) WITH ('changelog-producer' = 'input')"))
+                .getRootCause()
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage(
+                        "Can not set changelog-producer on table without primary keys, please define primary keys.");
+
+        sql("CREATE TABLE T (a INT)");
+        assertThatThrownBy(() -> sql("ALTER TABLE T SET ('changelog-producer'='input')"))
+                .getRootCause()
+                .isInstanceOf(UnsupportedOperationException.class)
+                .hasMessage(
+                        "Can not set changelog-producer on table without primary keys, please define primary keys.");
     }
 
     @Test

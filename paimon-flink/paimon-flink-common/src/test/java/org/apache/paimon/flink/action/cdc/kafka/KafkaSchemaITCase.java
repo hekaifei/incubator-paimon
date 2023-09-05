@@ -18,6 +18,7 @@
 
 package org.apache.paimon.flink.action.cdc.kafka;
 
+import org.apache.paimon.flink.action.cdc.TypeMapping;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.DataTypes;
 
@@ -39,7 +40,7 @@ public class KafkaSchemaITCase extends KafkaActionITCaseBase {
         final String topic = "test_kafka_schema";
         createTestTopic(topic, 1, 1);
         // ---------- Write the Canal json into Kafka -------------------
-        List<String> lines = readLines("kafka.canal/table/schemaevolution/canal-data-1.txt");
+        List<String> lines = readLines("kafka/canal/table/schemaevolution/canal-data-1.txt");
         try {
             writeRecordsToKafka(topic, lines);
         } catch (Exception e) {
@@ -50,7 +51,8 @@ public class KafkaSchemaITCase extends KafkaActionITCaseBase {
         kafkaConfig.put("topic", topic);
 
         KafkaSchema kafkaSchema =
-                KafkaSchema.getKafkaSchema(Configuration.fromMap(kafkaConfig), topic);
+                KafkaSchema.getKafkaSchema(
+                        Configuration.fromMap(kafkaConfig), topic, TypeMapping.defaultMapping());
         Map<String, DataType> fields = new LinkedHashMap<>();
         fields.put("pt", DataTypes.INT());
         fields.put("_id", DataTypes.INT());

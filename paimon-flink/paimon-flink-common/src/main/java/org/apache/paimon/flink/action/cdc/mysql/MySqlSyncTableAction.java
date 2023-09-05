@@ -18,12 +18,17 @@
 
 package org.apache.paimon.flink.action.cdc.mysql;
 
+import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.flink.action.Action;
 import org.apache.paimon.flink.action.ActionBase;
+import org.apache.paimon.flink.action.cdc.CdcActionCommonUtils;
 import org.apache.paimon.flink.action.cdc.ComputedColumn;
+import org.apache.paimon.flink.action.cdc.TypeMapping;
+import org.apache.paimon.flink.action.cdc.mysql.schema.MySqlSchemasInfo;
+import org.apache.paimon.flink.action.cdc.mysql.schema.MySqlTableInfo;
 import org.apache.paimon.flink.sink.cdc.CdcSinkBuilder;
 import org.apache.paimon.flink.sink.cdc.EventParser;
 import org.apache.paimon.schema.Schema;
@@ -37,7 +42,8 @@ import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 
 import java.time.ZoneId;
 import java.util.ArrayList;
-import java.util.Collections;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -46,7 +52,6 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static org.apache.paimon.flink.action.cdc.ComputedColumnUtils.buildComputedColumns;
-import static org.apache.paimon.flink.action.cdc.mysql.MySqlActionUtils.MYSQL_CONVERTER_TINYINT1_BOOL;
 import static org.apache.paimon.utils.Preconditions.checkArgument;
 
 /**
@@ -82,55 +87,63 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
  */
 public class MySqlSyncTableAction extends ActionBase {
 
-    private final Configuration mySqlConfig;
     private final String database;
     private final String table;
-    private final List<String> partitionKeys;
-    private final List<String> primaryKeys;
-    private final List<String> computedColumnArgs;
-    private final Map<String, String> tableConfig;
+    private final Configuration mySqlConfig;
+
+    private List<String> partitionKeys = new ArrayList<>();
+    private List<String> primaryKeys = new ArrayList<>();
+
+    private Map<String, String> tableConfig = new HashMap<>();
+    private List<String> computedColumnArgs = new ArrayList<>();
+    private TypeMapping typeMapping = TypeMapping.defaultMapping();
 
     public MySqlSyncTableAction(
-            Map<String, String> mySqlConfig,
             String warehouse,
             String database,
             String table,
-            List<String> partitionKeys,
-            List<String> primaryKeys,
             Map<String, String> catalogConfig,
-            Map<String, String> tableConfig) {
-        this(
-                mySqlConfig,
-                warehouse,
-                database,
-                table,
-                partitionKeys,
-                primaryKeys,
-                Collections.emptyList(),
-                catalogConfig,
-                tableConfig);
-    }
-
-    public MySqlSyncTableAction(
-            Map<String, String> mySqlConfig,
-            String warehouse,
-            String database,
-            String table,
-            List<String> partitionKeys,
-            List<String> primaryKeys,
-            List<String> computedColumnArgs,
-            Map<String, String> catalogConfig,
-            Map<String, String> tableConfig) {
+            Map<String, String> mySqlConfig) {
         super(warehouse, catalogConfig);
-        this.mySqlConfig = Configuration.fromMap(mySqlConfig);
         this.database = database;
         this.table = table;
-        this.partitionKeys = partitionKeys;
-        this.primaryKeys = primaryKeys;
-        this.computedColumnArgs = computedColumnArgs;
-        this.tableConfig = tableConfig;
+        this.mySqlConfig = Configuration.fromMap(mySqlConfig);
     }
 
+    public MySqlSyncTableAction withPartitionKeys(String... partitionKeys) {
+        return withPartitionKeys(Arrays.asList(partitionKeys));
+    }
+
+    public MySqlSyncTableAction withPartitionKeys(List<String> partitionKeys) {
+        this.partitionKeys = partitionKeys;
+        return this;
+    }
+
+    public MySqlSyncTableAction withPrimaryKeys(String... primaryKeys) {
+        return withPrimaryKeys(Arrays.asList(primaryKeys));
+    }
+
+    public MySqlSyncTableAction withPrimaryKeys(List<String> primaryKeys) {
+        this.primaryKeys = primaryKeys;
+        return this;
+    }
+
+    public MySqlSyncTableAction withTableConfig(Map<String, String> tableConfig) {
+        this.tableConfig = tableConfig;
+        return this;
+    }
+
+    public MySqlSyncTableAction withComputedColumnArgs(List<String> computedColumnArgs) {
+        this.computedColumnArgs = computedColumnArgs;
+        return this;
+    }
+
+    public MySqlSyncTableAction withTypeMapping(TypeMapping typeMapping) {
+        this.typeMapping = typeMapping;
+        return this;
+    }
+
+    @Override
     public void build(StreamExecutionEnvironment env) throws Exception {
         checkArgument(
                 mySqlConfig.contains(MySqlSourceOptions.TABLE_NAME),
@@ -143,34 +156,21 @@ public class MySqlSyncTableAction extends ActionBase {
             validateCaseInsensitive();
         }
 
-        List<MySqlSchema> mySqlSchemaList =
-                MySqlActionUtils.getMySqlSchemaList(
-                        mySqlConfig, monitorTablePredication(), new ArrayList<>());
-
-        String tableList =
-                mySqlSchemaList.stream()
-                        .map(m -> m.identifier().getDatabaseName() + "." + m.tableName())
-                        .collect(Collectors.joining("|"));
-
-        MySqlSource<String> source = MySqlActionUtils.buildMySqlSource(mySqlConfig, tableList);
-
-        MySqlSchema mySqlSchema =
-                mySqlSchemaList.stream()
-                        .reduce(MySqlSchema::merge)
-                        .orElseThrow(
-                                () ->
-                                        new RuntimeException(
-                                                "No table satisfies the given database name and table name"));
+        MySqlSchemasInfo mySqlSchemasInfo =
+                MySqlActionUtils.getMySqlTableInfos(
+                        mySqlConfig, monitorTablePredication(), new ArrayList<>(), typeMapping);
+        validateMySqlTableInfos(mySqlSchemasInfo);
 
         catalog.createDatabase(database, true);
 
+        MySqlTableInfo tableInfo = mySqlSchemasInfo.mergeAll();
         Identifier identifier = new Identifier(database, table);
         FileStoreTable table;
         List<ComputedColumn> computedColumns =
-                buildComputedColumns(computedColumnArgs, mySqlSchema.typeMapping());
+                buildComputedColumns(computedColumnArgs, tableInfo.schema().typeMapping());
         Schema fromMySql =
                 MySqlActionUtils.buildPaimonSchema(
-                        mySqlSchema,
+                        tableInfo,
                         partitionKeys,
                         primaryKeys,
                         computedColumns,
@@ -190,19 +190,25 @@ public class MySqlSyncTableAction extends ActionBase {
                         computedFields,
                         fieldNames);
             }
-            MySqlActionUtils.assertSchemaCompatible(table.schema(), fromMySql);
+            CdcActionCommonUtils.assertSchemaCompatible(table.schema(), fromMySql.fields());
         } catch (Catalog.TableNotExistException e) {
             catalog.createTable(identifier, fromMySql, false);
             table = (FileStoreTable) catalog.getTable(identifier);
         }
 
+        String tableList =
+                mySqlSchemasInfo.pkTables().stream()
+                        .map(i -> i.getDatabaseName() + "\\." + i.getObjectName())
+                        .collect(Collectors.joining("|"));
+        MySqlSource<String> source = MySqlActionUtils.buildMySqlSource(mySqlConfig, tableList);
+
         String serverTimeZone = mySqlConfig.get(MySqlSourceOptions.SERVER_TIME_ZONE);
         ZoneId zoneId = serverTimeZone == null ? ZoneId.systemDefault() : ZoneId.of(serverTimeZone);
-        Boolean convertTinyint1ToBool = mySqlConfig.get(MYSQL_CONVERTER_TINYINT1_BOOL);
+        TypeMapping typeMapping = this.typeMapping;
         EventParser.Factory<String> parserFactory =
                 () ->
                         new MySqlDebeziumJsonEventParser(
-                                zoneId, caseSensitive, computedColumns, convertTinyint1ToBool);
+                                zoneId, caseSensitive, computedColumns, typeMapping);
 
         CdcSinkBuilder<String> sinkBuilder =
                 new CdcSinkBuilder<String>()
@@ -247,12 +253,36 @@ public class MySqlSyncTableAction extends ActionBase {
         }
     }
 
-    private Predicate<MySqlSchema> monitorTablePredication() {
-        return schema -> {
+    private void validateMySqlTableInfos(MySqlSchemasInfo mySqlSchemasInfo) {
+        List<Identifier> nonPkTables = mySqlSchemasInfo.nonPkTables();
+        checkArgument(
+                nonPkTables.isEmpty(),
+                "Source tables of MySQL table synchronization job cannot contain table "
+                        + "which doesn't have primary keys.\n"
+                        + "They are: %s",
+                nonPkTables.stream().map(Identifier::getFullName).collect(Collectors.joining(",")));
+
+        checkArgument(
+                !mySqlSchemasInfo.pkTables().isEmpty(),
+                "No table satisfies the given database name and table name.");
+    }
+
+    private Predicate<String> monitorTablePredication() {
+        return tableName -> {
             Pattern tableNamePattern =
                     Pattern.compile(mySqlConfig.get(MySqlSourceOptions.TABLE_NAME));
-            return tableNamePattern.matcher(schema.tableName()).matches();
+            return tableNamePattern.matcher(tableName).matches();
         };
+    }
+
+    @VisibleForTesting
+    public Map<String, String> tableConfig() {
+        return tableConfig;
+    }
+
+    @VisibleForTesting
+    public Map<String, String> catalogConfig() {
+        return catalogConfig;
     }
 
     // ------------------------------------------------------------------------

@@ -92,6 +92,15 @@ public class SchemaValidation {
                             WRITE_MODE.key(), APPEND_ONLY, CHANGELOG_PRODUCER.key()));
         }
 
+        if (options.writeMode() == WriteMode.AUTO
+                && schema.primaryKeys().isEmpty()
+                && changelogProducer != ChangelogProducer.NONE) {
+            throw new UnsupportedOperationException(
+                    String.format(
+                            "Can not set %s on table without primary keys, please define primary keys.",
+                            CHANGELOG_PRODUCER.key()));
+        }
+
         checkArgument(
                 options.snapshotNumRetainMin() > 0,
                 SNAPSHOT_NUM_RETAINED_MIN.key() + " should be at least 1");
@@ -346,21 +355,21 @@ public class SchemaValidation {
 
             List<DataField> fields = schema.fields();
 
-            for (int i = 0; i < fields.size(); i++) {
-                DataField dataField = fields.get(i);
-                String defaultValueStr = defaultValues.get(dataField.name());
+            for (DataField field : fields) {
+                String defaultValueStr = defaultValues.get(field.name());
                 if (defaultValueStr == null) {
                     continue;
                 }
 
+                @SuppressWarnings("unchecked")
                 CastExecutor<Object, Object> resolve =
                         (CastExecutor<Object, Object>)
-                                CastExecutors.resolve(VarCharType.STRING_TYPE, dataField.type());
+                                CastExecutors.resolve(VarCharType.STRING_TYPE, field.type());
                 if (resolve == null) {
                     throw new IllegalArgumentException(
                             String.format(
                                     "The column %s with datatype %s is currently not supported for default value.",
-                                    dataField.name(), dataField.type().asSQLString()));
+                                    field.name(), field.type().asSQLString()));
                 }
 
                 try {
@@ -369,7 +378,7 @@ public class SchemaValidation {
                     throw new IllegalArgumentException(
                             String.format(
                                     "The default value %s of the column %s can not be cast to datatype: %s",
-                                    defaultValueStr, dataField.name(), dataField.type()),
+                                    defaultValueStr, field.name(), field.type()),
                             e);
                 }
             }

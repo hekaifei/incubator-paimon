@@ -125,6 +125,10 @@ You can now start Flink SQL client to execute SQL scripts.
 
 **Step 5: Create a Catalog and a Table**
 
+{{< tabs "Create Flink Catalog" >}}
+
+{{< tab "Catalog" >}}
+
 ```sql
 -- if you're trying out Paimon in a distributed environment,
 -- the warehouse path should be set to a shared file system, such as HDFS or OSS
@@ -141,6 +145,42 @@ CREATE TABLE word_count (
     cnt BIGINT
 );
 ```
+
+{{< /tab >}}
+
+{{< tab "Generic-Catalog" >}}
+
+Using FlinkGenericCatalog, you need to use Hive metastore. Then, you can use all the tables from Paimon, Hive, and
+Flink Generic Tables (Kafka and other tables)!
+
+In this mode, you should use 'connector' option for creating tables.
+
+{{< hint info >}}
+Paimon will use `hive.metastore.warehouse.dir` in your `hive-site.xml`, please use path with scheme.
+For example, `hdfs://...`. Otherwise, Paimon will use the local path.
+{{< /hint >}}
+
+```sql
+CREATE CATALOG my_catalog WITH (
+    'type'='paimon-generic',
+    'hive-conf-dir'='...',
+    'hadoop-conf-dir'='...'
+);
+
+USE CATALOG my_catalog;
+
+-- create a word count table
+CREATE TABLE word_count (
+    word STRING PRIMARY KEY NOT ENFORCED,
+    cnt BIGINT
+) WITH (
+    'connector'='paimon'
+);
+```
+
+{{< /tab >}}
+
+{{< /tabs >}}
 
 **Step 6: Write Data**
 
@@ -227,7 +267,7 @@ The following command will used to compact a table
 
 ## Supported Flink Data Type
 
-See [Flink Data Types](https://nightlies.apache.org/flink/flink-docs-release-1.16/docs/dev/table/types/).
+See [Flink Data Types](https://nightlies.apache.org/flink/flink-docs-stable/docs/dev/table/types/).
 
 All Flink data types are supported, except that
 
@@ -235,6 +275,7 @@ All Flink data types are supported, except that
 * `MAP` is not supported as primary keys.
 
 ## Use Flink Managed Memory
+
 Paimon tasks can create memory pools based on executor memory which will be managed by Flink executor, such as managed memory in Flink task manager. It will improve the stability and performance of sinks by managing writer buffers for multiple tasks through executor.
 
 The following properties can be set if using Flink managed memory:

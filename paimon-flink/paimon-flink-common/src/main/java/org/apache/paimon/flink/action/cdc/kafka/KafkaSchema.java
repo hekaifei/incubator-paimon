@@ -18,7 +18,10 @@
 
 package org.apache.paimon.flink.action.cdc.kafka;
 
-import org.apache.paimon.flink.action.cdc.kafka.canal.CanalRecordParser;
+import org.apache.paimon.flink.action.cdc.TableNameConverter;
+import org.apache.paimon.flink.action.cdc.TypeMapping;
+import org.apache.paimon.flink.action.cdc.kafka.formats.DataFormat;
+import org.apache.paimon.flink.action.cdc.kafka.formats.RecordParser;
 import org.apache.paimon.types.DataType;
 
 import org.apache.flink.configuration.Configuration;
@@ -32,28 +35,33 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.StringDeserializer;
 
 import java.time.Duration;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Properties;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
 
 import static org.apache.paimon.flink.action.cdc.kafka.KafkaActionUtils.kafkaPropertiesGroupId;
+import static org.apache.paimon.flink.action.cdc.kafka.formats.DataFormat.getDataFormat;
 
 /** Utility class to load canal kafka schema. */
 public class KafkaSchema {
 
     private static final int MAX_RETRY = 5;
-    private static final int POLL_TIMEOUT_MILLIS = 100;
+    private static final int POLL_TIMEOUT_MILLIS = 1000;
     private final String databaseName;
     private final String tableName;
-    private final Map<String, DataType> fields;
+    private final LinkedHashMap<String, DataType> fields;
     private final List<String> primaryKeys;
 
     public KafkaSchema(
             String databaseName,
             String tableName,
-            Map<String, DataType> fields,
+            LinkedHashMap<String, DataType> fields,
             List<String> primaryKeys) {
         this.databaseName = databaseName;
         this.tableName = tableName;
@@ -69,7 +77,7 @@ public class KafkaSchema {
         return databaseName;
     }
 
-    public Map<String, DataType> fields() {
+    public LinkedHashMap<String, DataType> fields() {
         return fields;
     }
 
@@ -99,39 +107,75 @@ public class KafkaSchema {
         }
         int firstPartition =
                 partitionInfos.stream().map(PartitionInfo::partition).sorted().findFirst().get();
-        consumer.assign(Collections.singletonList(new TopicPartition(topic, firstPartition)));
+        Collection<TopicPartition> topicPartitions =
+                Collections.singletonList(new TopicPartition(topic, firstPartition));
+        consumer.assign(topicPartitions);
+        consumer.seekToBeginning(topicPartitions);
 
         return consumer;
     }
 
-    public static KafkaSchema getKafkaSchema(Configuration kafkaConfig, String topic)
-            throws Exception {
+    /**
+     * Retrieves the Kafka schema for a given topic.
+     *
+     * @param kafkaConfig The configuration for Kafka.
+     * @param topic The topic to retrieve the schema for.
+     * @param typeMapping data type mapping options.
+     * @return The Kafka schema for the topic.
+     * @throws KafkaSchemaRetrievalException If unable to retrieve the schema after max retries.
+     */
+    public static KafkaSchema getKafkaSchema(
+            Configuration kafkaConfig, String topic, TypeMapping typeMapping)
+            throws KafkaSchemaRetrievalException {
         KafkaConsumer<String, String> consumer = getKafkaEarliestConsumer(kafkaConfig, topic);
         int retry = 0;
         int retryInterval = 1000;
+
+        DataFormat format = getDataFormat(kafkaConfig);
+        RecordParser recordParser =
+                format.createParser(
+                        true, new TableNameConverter(true), typeMapping, Collections.emptyList());
+
         while (true) {
-            ConsumerRecords<String, String> records =
+            ConsumerRecords<String, String> consumerRecords =
                     consumer.poll(Duration.ofMillis(POLL_TIMEOUT_MILLIS));
-            for (ConsumerRecord<String, String> record : records) {
-                String format = kafkaConfig.get(KafkaConnectorOptions.VALUE_FORMAT);
-                if ("canal-json".equals(format)) {
-                    CanalRecordParser parser = new CanalRecordParser(true, Collections.emptyList());
-                    KafkaSchema kafkaSchema = parser.getKafkaSchema(record.value());
-                    if (kafkaSchema != null) {
-                        return kafkaSchema;
-                    }
-                } else {
-                    throw new UnsupportedOperationException(
-                            "This format: " + format + " is not support.");
-                }
+            Iterable<ConsumerRecord<String, String>> records = consumerRecords.records(topic);
+            Stream<ConsumerRecord<String, String>> recordStream =
+                    StreamSupport.stream(records.spliterator(), false);
+
+            Optional<KafkaSchema> kafkaSchema =
+                    recordStream
+                            .map(record -> recordParser.getKafkaSchema(record.value()))
+                            .filter(Objects::nonNull)
+                            .findFirst();
+
+            if (kafkaSchema.isPresent()) {
+                return kafkaSchema.get();
             }
-            if (retry == MAX_RETRY) {
-                throw new Exception(
-                        String.format("Could not get metadata from server,topic:%s", topic));
+
+            if (retry >= MAX_RETRY) {
+                throw new KafkaSchemaRetrievalException(
+                        String.format("Could not get metadata from server, topic: %s", topic));
             }
-            Thread.sleep(retryInterval);
+
+            sleepSafely(retryInterval);
             retryInterval *= 2;
             retry++;
+        }
+    }
+
+    private static void sleepSafely(int duration) {
+        try {
+            Thread.sleep(duration);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Custom exception to indicate issues with Kafka schema retrieval. */
+    public static class KafkaSchemaRetrievalException extends Exception {
+        public KafkaSchemaRetrievalException(String message) {
+            super(message);
         }
     }
 

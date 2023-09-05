@@ -18,7 +18,6 @@
 
 package org.apache.paimon.hive;
 
-import org.apache.paimon.catalog.AbstractCatalog;
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.CatalogLock;
 import org.apache.paimon.catalog.Identifier;
@@ -27,7 +26,6 @@ import org.apache.paimon.fs.local.LocalFileIO;
 import org.apache.paimon.hive.annotation.Minio;
 import org.apache.paimon.hive.runner.PaimonEmbeddedHiveRunner;
 import org.apache.paimon.s3.MinioTestContainer;
-import org.apache.paimon.table.FileStoreTable;
 
 import com.klarna.hiverunner.HiveShell;
 import com.klarna.hiverunner.annotations.HiveSQL;
@@ -50,7 +48,6 @@ import org.junit.rules.TestRule;
 import org.junit.runner.RunWith;
 import org.junit.runners.model.Statement;
 
-import java.io.File;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -64,7 +61,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -347,11 +343,30 @@ public abstract class HiveCatalogITCaseBase {
     }
 
     @Test
+    public void testHiveCreateAndFlinkInsertRead() throws Exception {
+        hiveShell.execute("SET hive.metastore.warehouse.dir=" + path);
+        hiveShell.execute(
+                "CREATE TABLE hive_test_table ( a INT, b STRING ) "
+                        + "STORED BY '"
+                        + PaimonStorageHandler.class.getName()
+                        + "'"
+                        + "TBLPROPERTIES ("
+                        + "  'primary-key'='a'"
+                        + ")");
+        tEnv.executeSql("INSERT INTO hive_test_table VALUES (1, 'Apache'), (2, 'Paimon')");
+        List<Row> actual = collect("SELECT * FROM hive_test_table");
+        assertThat(actual).contains(Row.of(1, "Apache"), Row.of(2, "Paimon"));
+    }
+
+    @Test
     public void testCreateTableAs() throws Exception {
         tEnv.executeSql("CREATE TABLE t (a INT)").await();
         tEnv.executeSql("INSERT INTO t VALUES(1)").await();
         tEnv.executeSql("CREATE TABLE t1 AS SELECT * FROM t").await();
-        List<Row> result = collect("SELECT * FROM t1$schemas s");
+        List<Row> result =
+                collect(
+                        "SELECT schema_id, fields, partition_keys, "
+                                + "primary_keys, options, `comment`  FROM t1$schemas s");
         assertThat(result.toString())
                 .isEqualTo("[+I[0, [{\"id\":0,\"name\":\"a\",\"type\":\"INT\"}], [], [], {}, ]]");
         List<Row> data = collect("SELECT * FROM t1");
@@ -379,7 +394,10 @@ public abstract class HiveCatalogITCaseBase {
                         + ") PARTITIONED BY (dt, hh)");
         tEnv.executeSql("INSERT INTO t_p  SELECT 1,2,'a','2023-02-19','12'").await();
         tEnv.executeSql("CREATE TABLE t1_p WITH ('partition' = 'dt') AS SELECT * FROM t_p").await();
-        List<Row> resultPartition = collect("SELECT * FROM t1_p$schemas s");
+        List<Row> resultPartition =
+                collect(
+                        "SELECT schema_id, fields, partition_keys, "
+                                + "primary_keys, options, `comment`  FROM t1_p$schemas s");
         assertThat(resultPartition.toString())
                 .isEqualTo(
                         "[+I[0, [{\"id\":0,\"name\":\"user_id\",\"type\":\"BIGINT\"},{\"id\":1,\"name\":\"item_id\",\"type\":\"BIGINT\"},{\"id\":2,\"name\":\"behavior\",\"type\":\"STRING\"}"
@@ -444,7 +462,8 @@ public abstract class HiveCatalogITCaseBase {
                                 tEnv.executeSql(
                                                 "CREATE TABLE t_pk_not_exist_as WITH ('primary-key' = 'aaa') AS SELECT * FROM t_pk_not_exist")
                                         .await())
-                .hasRootCauseMessage("Primary key column '[aaa]' is not defined in the schema.");
+                .hasRootCauseMessage(
+                        "Table column [user_id, item_id, behavior, dt, hh] should include all primary key constraint [aaa]");
 
         // primary key in option and DDL.
         assertThatThrownBy(
@@ -478,7 +497,8 @@ public abstract class HiveCatalogITCaseBase {
                                 tEnv.executeSql(
                                                 "CREATE TABLE t_partition_not_exist_as WITH ('partition' = 'aaa') AS SELECT * FROM t_partition_not_exist")
                                         .await())
-                .hasRootCauseMessage("Partition column '[aaa]' is not defined in the schema.");
+                .hasRootCauseMessage(
+                        "Table column [user_id, item_id, behavior, dt, hh] should include all partition fields [aaa]");
 
         // partition in option and DDL.
         assertThatThrownBy(
@@ -500,7 +520,7 @@ public abstract class HiveCatalogITCaseBase {
     public void testRenameTable() throws Exception {
         tEnv.executeSql("CREATE TABLE t1 (a INT)").await();
         tEnv.executeSql("CREATE TABLE t2 (a INT)").await();
-        tEnv.executeSql("INSERT INTO t1 SELECT 1");
+        tEnv.executeSql("INSERT INTO t1 SELECT 1").await();
         // the source table do not exist.
         assertThatThrownBy(() -> tEnv.executeSql("ALTER TABLE t3 RENAME TO t4"))
                 .hasMessage(
@@ -517,21 +537,21 @@ public abstract class HiveCatalogITCaseBase {
                         "Could not execute ALTER TABLE my_hive.test_db.t1 RENAME TO my_hive.test_db.T1");
 
         tEnv.executeSql("ALTER TABLE t1 RENAME TO t3").await();
+
+        // hive read
         List<String> tables = hiveShell.executeQuery("SHOW TABLES");
         assertThat(tables.contains("t3")).isTrue();
         assertThat(tables.contains("t1")).isFalse();
+        List<String> data = hiveShell.executeQuery("SELECT * FROM t3");
+        assertThat(data).containsExactlyInAnyOrder("1");
 
-        Identifier identifier = new Identifier("test_db", "t3");
-        Catalog catalog =
-                ((FlinkCatalog) tEnv.getCatalog(tEnv.getCurrentCatalog()).get()).catalog();
-        org.apache.paimon.fs.Path tablePath =
-                ((AbstractCatalog) catalog).getDataTableLocation(identifier);
-        assertThat(tablePath.toString()).isEqualTo(path + "test_db.db" + File.separator + "t3");
+        // flink read
+        List<Row> tablesFromFlink = collect("SHOW TABLES");
+        assertThat(tablesFromFlink).contains(Row.of("t3"));
+        assertThat(tablesFromFlink).doesNotContain(Row.of("t1"));
 
-        // TODO: the hiverunner (4.0) has a bug ,it can not rename the table path correctly ,
-        // we should upgrade it to the 6.0 later ,and  update the test case for query.
-        assertThatThrownBy(() -> tEnv.executeSql("SELECT * FROM t3"))
-                .hasMessageContaining("SQL validation failed. There is no paimond in");
+        List<Row> dataFromFlink = collect("SELECT * FROM t3");
+        assertThat(dataFromFlink).contains(Row.of(1));
     }
 
     @Test
@@ -745,30 +765,6 @@ public abstract class HiveCatalogITCaseBase {
     }
 
     @Test
-    public void testClearSchemaAfterUnSupportType()
-            throws InterruptedException, ExecutionException, Catalog.TableNotExistException {
-        assertThatThrownBy(
-                        () ->
-                                tEnv.executeSql(
-                                                "CREATE TABLE t001(id INT PRIMARY KEY NOT ENFORCED , d TIME)")
-                                        .await())
-                .hasRootCauseInstanceOf(UnsupportedOperationException.class)
-                .hasRootCauseMessage("Unsupported type: TIME(0)");
-        Identifier identifier = new Identifier("test_db", "t001");
-        Catalog catalog =
-                ((FlinkCatalog) tEnv.getCatalog(tEnv.getCurrentCatalog()).get()).catalog();
-        assertThat(catalog.tableExists(identifier)).isFalse();
-
-        tEnv.executeSql("CREATE TABLE  t002(id INT PRIMARY KEY NOT ENFORCED , b STRING)").await();
-        assertThatThrownBy(() -> tEnv.executeSql("ALTER TABLE t002 MODIFY b TIME").await())
-                .hasRootCauseInstanceOf(UnsupportedOperationException.class)
-                .hasRootCauseMessage("Unsupported type: TIME(0)");
-        identifier = new Identifier("test_db", "t002");
-        FileStoreTable table = (FileStoreTable) catalog.getTable(identifier);
-        assertThat(table.schema().fields().toString()).isEqualTo("[`id` INT NOT NULL, `b` STRING]");
-    }
-
-    @Test
     public void testAddPartitionsToMetastore() throws Exception {
         prepareTestAddPartitionsToMetastore();
 
@@ -849,6 +845,24 @@ public abstract class HiveCatalogITCaseBase {
                         "ptb=2b/pta=2",
                         "ptb=3a/pta=3",
                         "ptb=3b/pta=3");
+    }
+
+    @Test
+    public void testAddPartitionsToMetastoreForUnpartitionedTable() throws Exception {
+        tEnv.executeSql(
+                String.join(
+                        "\n",
+                        "CREATE TABLE t (",
+                        "    k INT,",
+                        "    v BIGINT,",
+                        "    PRIMARY KEY (k) NOT ENFORCED",
+                        ") WITH (",
+                        "    'bucket' = '2',",
+                        "    'metastore.partitioned-table' = 'true'",
+                        ")"));
+        tEnv.executeSql("INSERT INTO t VALUES (1, 10), (2, 20)").await();
+        assertThat(hiveShell.executeQuery("SELECT * FROM t ORDER BY k"))
+                .containsExactlyInAnyOrder("1\t10", "2\t20");
     }
 
     protected List<Row> collect(String sql) throws Exception {

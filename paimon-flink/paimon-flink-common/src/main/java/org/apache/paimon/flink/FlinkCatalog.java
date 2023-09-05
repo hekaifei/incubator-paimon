@@ -20,11 +20,13 @@ package org.apache.paimon.flink;
 
 import org.apache.paimon.catalog.Catalog;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.schema.SchemaChange;
 import org.apache.paimon.schema.SchemaManager;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.Table;
+import org.apache.paimon.utils.StringUtils;
 
 import org.apache.flink.table.api.TableColumn;
 import org.apache.flink.table.api.TableSchema;
@@ -70,6 +72,7 @@ import org.apache.flink.table.factories.Factory;
 import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.RowType;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -88,6 +91,8 @@ import static org.apache.flink.table.descriptors.Schema.SCHEMA;
 import static org.apache.flink.table.factories.FactoryUtil.CONNECTOR;
 import static org.apache.flink.table.types.utils.TypeConversions.fromLogicalToDataType;
 import static org.apache.paimon.CoreOptions.PATH;
+import static org.apache.paimon.flink.FlinkCatalogOptions.LOG_SYSTEM_AUTO_REGISTER;
+import static org.apache.paimon.flink.FlinkCatalogOptions.REGISTER_TIMEOUT;
 import static org.apache.paimon.flink.LogicalTypeConversion.toDataType;
 import static org.apache.paimon.flink.LogicalTypeConversion.toLogicalType;
 import static org.apache.paimon.flink.log.LogStoreRegister.registerLogSystem;
@@ -107,16 +112,19 @@ public class FlinkCatalog extends AbstractCatalog {
     private final Catalog catalog;
     private final boolean logStoreAutoRegister;
 
+    private final Duration logStoreAutoRegisterTimeout;
+
     public FlinkCatalog(
             Catalog catalog,
             String name,
             String defaultDatabase,
             ClassLoader classLoader,
-            boolean logStoreAutoRegister) {
+            Options options) {
         super(name, defaultDatabase);
         this.catalog = catalog;
         this.classLoader = classLoader;
-        this.logStoreAutoRegister = logStoreAutoRegister;
+        this.logStoreAutoRegister = options.get(LOG_SYSTEM_AUTO_REGISTER);
+        this.logStoreAutoRegisterTimeout = options.get(REGISTER_TIMEOUT);
         try {
             this.catalog.createDatabase(defaultDatabase, true);
         } catch (Catalog.DatabaseAlreadyExistException ignore) {
@@ -245,17 +253,28 @@ public class FlinkCatalog extends AbstractCatalog {
         }
         CatalogTable catalogTable = (CatalogTable) table;
         Map<String, String> options = table.getOptions();
-        if (options.containsKey(CONNECTOR.key())) {
+        String connector = options.get(CONNECTOR.key());
+        options.remove(CONNECTOR.key());
+        if (!StringUtils.isNullOrWhitespaceOnly(connector)
+                && !FlinkCatalogFactory.IDENTIFIER.equals(connector)) {
             throw new CatalogException(
-                    "Paimon Catalog only supports paimon tables ,"
-                            + " and you don't need to specify  'connector'= '"
-                            + FlinkCatalogFactory.IDENTIFIER
+                    "Paimon Catalog only supports paimon tables,"
+                            + " but you specify  'connector'= '"
+                            + connector
                             + "' when using Paimon Catalog\n"
                             + " You can create TEMPORARY table instead if you want to create the table of other connector.");
         }
 
         Identifier identifier = toIdentifier(tablePath);
         if (logStoreAutoRegister) {
+            // Although catalog.createTable will copy the default options, but we need this info
+            // here before create table, such as table-default.kafka.bootstrap.servers defined in
+            // catalog options. Temporarily, we copy the default options here.
+            if (catalog instanceof org.apache.paimon.catalog.AbstractCatalog) {
+                ((org.apache.paimon.catalog.AbstractCatalog) catalog)
+                        .copyTableDefaultOptions(options);
+            }
+            options.put(REGISTER_TIMEOUT.key(), logStoreAutoRegisterTimeout.toString());
             registerLogSystem(catalog, identifier, options, classLoader);
         }
         // remove table path

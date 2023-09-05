@@ -29,6 +29,7 @@ import javax.annotation.Nullable;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -120,7 +121,13 @@ public class TagAutoCreation {
                 tryToTag(snapshotManager.snapshot(nextSnapshot));
                 nextSnapshot++;
             } else {
-                break;
+                // avoid snapshot has been expired
+                Long earliest = snapshotManager.earliestSnapshotId();
+                if (earliest != null && earliest > nextSnapshot) {
+                    nextSnapshot = earliest;
+                } else {
+                    break;
+                }
             }
         }
     }
@@ -273,6 +280,11 @@ public class TagAutoCreation {
         @Override
         protected DateTimeFormatter formatter() {
             return DAY_FORMATTER;
+        }
+
+        @Override
+        public LocalDateTime tagToTime(String tag) {
+            return LocalDate.parse(tag, formatter()).atStartOfDay();
         }
     }
 

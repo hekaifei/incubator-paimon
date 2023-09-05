@@ -18,6 +18,7 @@
 
 package org.apache.paimon.flink.action.cdc.mysql;
 
+import org.apache.paimon.flink.action.cdc.TypeMapping;
 import org.apache.paimon.flink.sink.cdc.NewTableSchemaBuilder;
 import org.apache.paimon.schema.Schema;
 import org.apache.paimon.types.DataType;
@@ -30,20 +31,24 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.stream.Collectors;
 
-import static org.apache.paimon.flink.action.cdc.mysql.MySqlActionUtils.MYSQL_CONVERTER_TINYINT1_BOOL;
-import static org.apache.paimon.utils.Preconditions.checkArgument;
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.columnDuplicateErrMsg;
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.listCaseConvert;
+import static org.apache.paimon.flink.action.cdc.CdcActionCommonUtils.mapKeyCaseConvert;
+import static org.apache.paimon.flink.action.cdc.TypeMapping.TypeMappingMode.TO_NULLABLE;
 
 /** Schema builder for MySQL cdc. */
 public class MySqlTableSchemaBuilder implements NewTableSchemaBuilder<JsonNode> {
 
     private final Map<String, String> tableConfig;
     private final boolean caseSensitive;
+    private final TypeMapping typeMapping;
 
-    public MySqlTableSchemaBuilder(Map<String, String> tableConfig, boolean caseSensitive) {
+    public MySqlTableSchemaBuilder(
+            Map<String, String> tableConfig, boolean caseSensitive, TypeMapping typeMapping) {
         this.tableConfig = tableConfig;
         this.caseSensitive = caseSensitive;
+        this.typeMapping = typeMapping;
     }
 
     @Override
@@ -54,17 +59,21 @@ public class MySqlTableSchemaBuilder implements NewTableSchemaBuilder<JsonNode> 
         LinkedHashMap<String, DataType> fields = new LinkedHashMap<>();
 
         for (JsonNode element : columns) {
-            Integer precision = element.has("length") ? element.get("length").asInt() : null;
-            Integer scale = element.has("scale") ? element.get("scale").asInt() : null;
-            fields.put(
-                    element.get("name").asText(),
-                    // TODO : add table comment and column comment when we upgrade flink cdc to 2.4
+            JsonNode length = element.get("length");
+            JsonNode scale = element.get("scale");
+            DataType dataType =
                     MySqlTypeUtils.toDataType(
-                                    element.get("typeExpression").asText(),
-                                    precision,
-                                    scale,
-                                    MYSQL_CONVERTER_TINYINT1_BOOL.defaultValue())
-                            .copy(element.get("optional").asBoolean()));
+                            element.get("typeExpression").asText(),
+                            length == null ? null : length.asInt(),
+                            scale == null ? null : scale.asInt(),
+                            typeMapping);
+
+            if (!typeMapping.containsMode(TO_NULLABLE)) {
+                dataType.copy(element.get("optional").asBoolean());
+            }
+
+            // TODO : add table comment and column comment when we upgrade flink cdc to 2.4
+            fields.put(element.get("name").asText(), dataType);
         }
 
         ArrayNode arrayNode = (ArrayNode) jsonTable.get("primaryKeyColumnNames");
@@ -73,22 +82,8 @@ public class MySqlTableSchemaBuilder implements NewTableSchemaBuilder<JsonNode> 
             primaryKeys.add(primary.asText());
         }
 
-        if (!caseSensitive) {
-            LinkedHashMap<String, DataType> tmp = new LinkedHashMap<>();
-            for (Map.Entry<String, DataType> entry : fields.entrySet()) {
-                String fieldName = entry.getKey();
-                checkArgument(
-                        !tmp.containsKey(fieldName.toLowerCase()),
-                        "Duplicate key '%s' in table '%s' appears when converting fields map keys to case-insensitive form.",
-                        fieldName,
-                        tableName);
-                tmp.put(fieldName.toLowerCase(), entry.getValue());
-            }
-            fields = tmp;
-
-            primaryKeys =
-                    primaryKeys.stream().map(String::toLowerCase).collect(Collectors.toList());
-        }
+        fields = mapKeyCaseConvert(fields, caseSensitive, columnDuplicateErrMsg(tableName));
+        primaryKeys = listCaseConvert(primaryKeys, caseSensitive);
 
         Schema.Builder builder = Schema.newBuilder();
         builder.options(tableConfig);
